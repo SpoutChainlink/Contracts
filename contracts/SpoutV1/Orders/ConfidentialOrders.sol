@@ -4,10 +4,12 @@ pragma solidity ^0.8.17;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {FunctionAssetConsumer} from "../Marketdata/FunctionAssetConsumer.sol";
+import {IOrdersReceiver} from "../interface/IOrdersReceiver.sol";
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@inco/lightning/src/Lib.sol";
 
-contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
+contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
     event BuyOrderCreated(
         address indexed user,
         string ticker,
@@ -46,7 +48,6 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
         address orderAddr;
     }
     mapping(bytes32 => PendingSellOrder) public pendingSellOrders;
-
     address public immutable agent;
     IERC20 public immutable usdcToken;
 
@@ -71,14 +72,13 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
         address orderAddr
     ) public {
         // Request price from inherited FunctionAssetConsumer
-        usdcToken.transferFrom(msg.sender, address(this), usdcAmount);
         bytes32 requestId = getAssetPrice(asset, subscriptionId);
-
-        // Create encrypted amount and set permissions
         euint256 eusdcAmount = e.asEuint256(usdcAmount);
         e.allow(eusdcAmount, msg.sender);
         e.allow(eusdcAmount, address(this));
         e.allow(eusdcAmount, agent);
+
+        e.requestDecryption(eusdcAmount, this.decryptionCallback.selector, abi.encode(msg.sender));
 
         // Store pending order with callback address
         pendingBuyOrders[requestId] = PendingBuyOrder(
@@ -88,6 +88,12 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
             eusdcAmount,
             orderAddr
         );
+    }
+
+    function decryptionCallback(uint256 requestId, uint256 _decryptedUint256, bytes memory data) public {
+        require(msg.sender == address(inco), "Only Inco Gateway can call this function");
+        address user = abi.decode(data, (address));
+        usdcToken.transferFrom(user, address(this), _decryptedUint256);
     }
 
     // Sell asset for USDC, requesting price from oracle
@@ -102,13 +108,10 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
     ) public {
         // Request price from inherited FunctionAssetConsumer
         bytes32 requestId = getAssetPrice(asset, subscriptionId);
-
-        // Create encrypted amount and set permissions
         euint256 etokenAmount = e.asEuint256(tokenAmount);
         e.allow(etokenAmount, msg.sender);
         e.allow(etokenAmount, address(this));
         e.allow(etokenAmount, agent);
-
         pendingSellOrders[requestId] = PendingSellOrder(
             msg.sender,
             ticker,
@@ -119,22 +122,16 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
     }
 
     // This function is called by the contract itself as a callback
-    function fulfillBuyOrder(bytes32 requestId, uint256 price) public {
+    function fulfillBuyOrder(bytes32 requestId, uint256 price) public override {
         PendingBuyOrder memory order = pendingBuyOrders[requestId];
         require(order.user != address(0), "Order not found");
         require(price > 0, "Price not fulfilled yet");
 
-        // Calculate asset amount using encrypted arithmetic (adjust decimals as needed)
-        euint256 eassetAmount = e.div(
-            e.mul(order.eusdcAmount, e.asEuint256(1e18)),
-            e.asEuint256(price)
-        );
-
-        // Set permissions for the calculated amount
+        // Calculate asset amount (adjust decimals as needed)
+        euint256 eassetAmount = e.div(e.mul(order.eusdcAmount, e.asEuint256(1e18)), e.asEuint256(price));
         e.allow(eassetAmount, order.user);
         e.allow(eassetAmount, address(this));
         e.allow(eassetAmount, agent);
-
         // Emit event
         emit BuyOrderCreated(
             order.user,
@@ -155,17 +152,11 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
         require(order.user != address(0), "Sell order not found");
         require(price > 0, "Price not fulfilled yet");
 
-        // Calculate USDC amount using encrypted arithmetic (adjust decimals as needed)
-        euint256 eusdcAmount = e.div(
-            e.mul(order.etokenAmount, e.asEuint256(price)),
-            e.asEuint256(1e18)
-        );
-
-        // Set permissions for the calculated amount
+        // Calculate USDC amount (adjust decimals as needed)
+        euint256 eusdcAmount = e.div(e.mul(order.etokenAmount, e.asEuint256(price)), e.asEuint256(1e18));
         e.allow(eusdcAmount, order.user);
         e.allow(eusdcAmount, address(this));
         e.allow(eusdcAmount, agent);
-
         // Emit event
         emit SellOrderCreated(
             order.user,
@@ -180,7 +171,7 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
         delete pendingSellOrders[requestId];
     }
 
-    function withdrawUSDC(uint256 amount) public onlyAgent {
+    function FulFillSellOrderUSDCWithdraw(uint256 amount) public onlyAgent {
         usdcToken.transfer(msg.sender, amount);
         emit FulFillSellOrderUSDCWithdraw(msg.sender, amount);
     }
@@ -200,7 +191,6 @@ contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
         uint256 price = abi.decode(response, (uint256));
         assetToPrice[asset] = price;
         emit Response(requestId, asset, price, response, err);
-
         // Only emit events for buy or sell orders stored in this contract
         PendingBuyOrder memory buyOrder = pendingBuyOrders[requestId];
         if (buyOrder.orderAddr != address(0)) {

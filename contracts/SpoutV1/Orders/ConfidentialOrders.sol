@@ -4,12 +4,11 @@ pragma solidity ^0.8.17;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {FunctionAssetConsumer} from "../Marketdata/FunctionAssetConsumer.sol";
-import {IOrdersReceiver} from "../interface/IOrdersReceiver.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@inco/lightning/src/Lib.sol";
+import {e, euint256, ebool, inco} from "@inco/lightning/src/Lib.sol";
 
-contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
+contract ConfidentialOrders is Ownable, FunctionAssetConsumer {
     event BuyOrderCreated(
         address indexed user,
         string ticker,
@@ -27,7 +26,7 @@ contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
         uint256 price
     );
 
-    event FulFillSellOrderUSDCWithdraw(address indexed user, uint256 amount);
+    event SellOrderUSDCWithdraw(address indexed user, uint256 amount);
 
     // Store pending orders
     struct PendingBuyOrder {
@@ -51,7 +50,7 @@ contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
     address public immutable agent;
     IERC20 public immutable usdcToken;
 
-    constructor(address _owner, address _agent, address _usdc) Ownable(_owner) {
+    constructor(address _agent, address _usdc) Ownable() {
         usdcToken = IERC20(_usdc);
         agent = _agent;
     }
@@ -73,7 +72,7 @@ contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
     ) public {
         // Request price from inherited FunctionAssetConsumer
         bytes32 requestId = getAssetPrice(asset, subscriptionId);
-        euint256 eusdcAmount = e.asEuint256(usdcAmount);
+        euint256 eusdcAmount = e.newEuint256(usdcAmount, address(this));
         e.allow(eusdcAmount, msg.sender);
         e.allow(eusdcAmount, address(this));
         e.allow(eusdcAmount, agent);
@@ -108,7 +107,7 @@ contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
     ) public {
         // Request price from inherited FunctionAssetConsumer
         bytes32 requestId = getAssetPrice(asset, subscriptionId);
-        euint256 etokenAmount = e.asEuint256(tokenAmount);
+        euint256 etokenAmount = e.newEuint256(tokenAmount, address(this));
         e.allow(etokenAmount, msg.sender);
         e.allow(etokenAmount, address(this));
         e.allow(etokenAmount, agent);
@@ -122,7 +121,7 @@ contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
     }
 
     // This function is called by the contract itself as a callback
-    function fulfillBuyOrder(bytes32 requestId, uint256 price) public override {
+    function fulfillBuyOrder(bytes32 requestId, uint256 price) public {
         PendingBuyOrder memory order = pendingBuyOrders[requestId];
         require(order.user != address(0), "Order not found");
         require(price > 0, "Price not fulfilled yet");
@@ -173,7 +172,7 @@ contract Orders is Ownable, FunctionAssetConsumer, IOrdersReceiver {
 
     function FulFillSellOrderUSDCWithdraw(uint256 amount) public onlyAgent {
         usdcToken.transfer(msg.sender, amount);
-        emit FulFillSellOrderUSDCWithdraw(msg.sender, amount);
+        emit SellOrderUSDCWithdraw(msg.sender, amount);
     }
 
     // Override fulfillRequest to call the callback for buy or sell orders
